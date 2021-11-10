@@ -7,11 +7,14 @@
 #
 
 
-import numpy as np
-from gnuradio import gr
 import queue
 
-from azure_software_radio.blob_common import get_blob_service_client, shutdown_blob_service_client
+import azure.core.exceptions as az_exceptions
+from gnuradio import gr
+import numpy as np
+
+from azure_software_radio.blob_common import blob_container_info_is_valid, get_blob_service_client
+from azure_software_radio.blob_common import shutdown_blob_service_client
 
 
 class blob_source(gr.sync_block):
@@ -35,11 +38,14 @@ class blob_source(gr.sync_block):
         token.
     Container Name: Name of the container where the blob of interest is stored.
     Blob Name: The name of the block blob to read from.
+    Retry Total: Total number of Azure API retries to allow before throwing an exception. Higher
+        numbers make the block more resilient to intermittent failures, lower numbers help to
+        more quickly iteratively debug authentication and permissions issues.
     """
 
     def __init__(self, authentication_method: str = "default", connection_str: str = None,
                  url: str = None, container_name: str = None, blob_name: str = None,
-                 queue_size: int = 4):
+                 queue_size: int = 4, retry_total: int = 10):
         """ Initialize the blob_source block
 
         Args:
@@ -50,6 +56,8 @@ class blob_source(gr.sync_block):
             blob_name (str): See "Blob Name" in class docstring above
             queue_size (int, optional): Defaults to 4. How many blocks of data to
                 buffer up before blocking. Larger numbers require more memory overhead
+            retry_total (int, optional): Total number of Azure API retries to allow before throwing
+                an exception
         """
         gr.sync_block.__init__(self,
                                name="blob_source",
@@ -63,7 +71,8 @@ class blob_source(gr.sync_block):
         self.blob_service_client = get_blob_service_client(
             authentication_method=authentication_method,
             connection_str=connection_str,
-            url=url
+            url=url,
+            retry_total=retry_total
         )
 
         self.blob_client = self.blob_service_client.get_blob_client(container=container_name,
@@ -142,6 +151,19 @@ class blob_source(gr.sync_block):
 
         # connect to the blob service the first time we run
         if self.first_run:
+
+            blob_container_info_is_valid(
+                blob_service_client=self.blob_service_client,
+                container_name=self.blob_client.container_name)
+
+            if not self.blob_client.exists():
+                container_name = self.blob_client.container_name
+                blob_name = self.blob_client.blob_name
+                err = az_exceptions.ResourceNotFoundError(
+                    f"Blob name '{blob_name} does not exist in container '{container_name}'")
+                self.log.error(f"{err}")
+                raise err
+
             self.blob_iter = self.setup_blob_iterator()
             self.first_run = False
 
